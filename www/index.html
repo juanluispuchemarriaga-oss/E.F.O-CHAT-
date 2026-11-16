@@ -80,3 +80,250 @@ body{font-family:system-ui,-apple-system,Roboto,sans-serif;background:#111b21;co
 <button id="botonAccion" onclick="accion()">🎤</button>
 </div>
 </div>
+
+<script>
+const MINUTOS_BORRADO = 10;
+const MS_BORRADO = MINUTOS_BORRADO * 60 * 1000;
+const MAX_SEG_AUDIO = 120;
+let peer = null, conexiones = {}, mensajes = [], miNombre = '', salaId = '', miId = '';
+let sonidoActivo = true, audioCtx = null;
+let grabador = null, trozos = [], grabando = false, tiempoGrab = 0, reloj = null, flujo = null;
+const colores = ['#53bdeb','#ffd279','#ff8a8a','#a8e6a1','#d7a8ff','#ffb27a','#7ae0d0'];
+
+function colorDe(nombre) {
+  let h = 0;
+  for (let i = 0; i < nombre.length; i++) h = (h * 31 + nombre.charCodeAt(i)) >>> 0;
+  return colores[h % colores.length];
+}
+
+/* Tono de mensaje nuevo */
+function tono() {
+  if (!sonidoActivo) return;
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    [[880, 0], [1175, 0.12]].forEach(([f, t]) => {
+      const o = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      o.type = 'sine';
+      o.frequency.value = f;
+      g.gain.setValueAtTime(0.0001, audioCtx.currentTime + t);
+      g.gain.exponentialRampToValueAtTime(0.25, audioCtx.currentTime + t + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + t + 0.18);
+      o.connect(g); g.connect(audioCtx.destination);
+      o.start(audioCtx.currentTime + t);
+      o.stop(audioCtx.currentTime + t + 0.2);
+    });
+    if (navigator.vibrate) navigator.vibrate(80);
+  } catch (e) {}
+}
+
+function alternarSonido() {
+  sonidoActivo = !sonidoActivo;
+  document.getElementById('sonido').textContent = sonidoActivo ? '🔔' : '🔕';
+}
+
+function idSala(sala, clave) {
+  return 'chatefimero-' + btoa(unescape(encodeURIComponent(sala.toLowerCase() + '|' + clave))).replace(/[^a-zA-Z0-9]/g, '').slice(0, 40);
+}
+
+function entrar() {
+  miNombre = document.getElementById('nombre').value.trim();
+  const sala = document.getElementById('sala').value.trim();
+  const clave = document.getElementById('clave').value;
+  if (!miNombre || !sala || !clave) { document.getElementById('estado').textContent = 'Llena todos los campos'; return; }
+  document.getElementById('estado').textContent = 'Conectando...';
+  salaId = idSala(sala, clave);
+  document.getElementById('titulo').textContent = sala;
+  try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
+  iniciarComoAnfitrion();
+}
+
+function iniciarComoAnfitrion() {
+  peer = new Peer(salaId);
+  peer.on('open', id => {
+    miId = id; mostrarChat();
+    aviso('🔒 Los mensajes y audios se borran solos cada ' + MINUTOS_BORRADO + ' minutos y no se guardan en ningún lado.');
+    sistema('Creaste la sala. Comparte el nombre y la clave.');
+  });
+  peer.on('connection', c => registrar(c));
+  peer.on('error', e => {
+    if (e.type === 'unavailable-id') {
+      peer = new Peer();
+      peer.on('open', id => { miId = id; unirseAlAnfitrion(); });
+      peer.on('connection', c => registrar(c));
+    } else document.getElementById('estado').textContent = 'Error: ' + e.type;
+  });
+}
+
+function unirseAlAnfitrion() {
+  const c = peer.connect(salaId, { reliable: true });
+  c.on('open', () => {
+    registrar(c); mostrarChat();
+    aviso('🔒 Los mensajes y audios se borran solos cada ' + MINUTOS_BORRADO + ' minutos y no se guardan en ningún lado.');
+    sistema('Te uniste a la sala');
+  });
+}
+
+function registrar(c) {
+  conexiones[c.peer] = c;
+  c.on('open', () => { c.send({ tipo: 'hola', nombre: miNombre }); });
+  c.on('data', d => recibir(d, c.peer));
+  c.on('close', () => { delete conexiones[c.peer]; });
+}
+
+function reenviar(d, deQuien) {
+  if (peer && peer.id === salaId) {
+    Object.keys(conexiones).forEach(k => { if (k !== deQuien && conexiones[k].open) conexiones[k].send(d); });
+  }
+}
+
+function recibir(d, deQuien) {
+  if (d.tipo === 'hola') { sistema(d.nombre + ' entró a la sala'); return; }
+  if (d.tipo === 'msg') {
+    agregar({ nombre: d.nombre, texto: d.texto, hora: Date.now(), mio: false });
+    tono();
+    reenviar(d, deQuien);
+  }
+  if (d.tipo === 'audio') {
+    const blob = new Blob([d.datos], { type: d.mime });
+    agregar({ nombre: d.nombre, audioUrl: URL.createObjectURL(blob), hora: Date.now(), mio: false });
+    tono();
+    reenviar(d, deQuien);
+  }
+}
+
+function enviar() {
+  const campo = document.getElementById('texto');
+  const texto = campo.value.trim();
+  if (!texto) return;
+  agregar({ nombre: miNombre, texto: texto, hora: Date.now(), mio: true });
+  Object.values(conexiones).forEach(c => { if (c.open) c.send({ tipo: 'msg', nombre: miNombre, texto: texto }); });
+  campo.value = '';
+  cambiarBoton();
+  campo.focus();
+}
+
+/* Botón de la derecha: micrófono si no hay texto, enviar si hay texto */
+function cambiarBoton() {
+  const hay = document.getElementById('texto').value.trim().length > 0;
+  document.getElementById('botonAccion').textContent = hay ? '➤' : '🎤';
+}
+
+function accion() {
+  const hayTexto = document.getElementById('texto').value.trim().length > 0;
+  if (hayTexto) { enviar(); return; }
+  if (grabando) detenerGrabacion(true); else iniciarGrabacion();
+}
+
+/* Notas de voz: toca el micrófono para empezar y vuelve a tocar para enviar */
+async function iniciarGrabacion() {
+  try {
+    flujo = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    sistema('No se pudo usar el micrófono. Revisa el permiso.');
+    return;
+  }
+  trozos = [];
+  grabador = new MediaRecorder(flujo);
+  grabador.ondataavailable = ev => { if (ev.data.size > 0) trozos.push(ev.data); };
+  grabador.onstop = async () => {
+    flujo.getTracks().forEach(t => t.stop());
+    if (!grabador.enviar) return;
+    const blob = new Blob(trozos, { type: grabador.mimeType || 'audio/webm' });
+    const datos = await blob.arrayBuffer();
+    agregar({ nombre: miNombre, audioUrl: URL.createObjectURL(blob), hora: Date.now(), mio: true });
+    Object.values(conexiones).forEach(c => {
+      if (c.open) c.send({ tipo: 'audio', nombre: miNombre, mime: blob.type, datos: datos });
+    });
+  };
+  grabador.enviar = false;
+  grabador.start();
+  grabando = true;
+  tiempoGrab = 0;
+  document.getElementById('texto').style.display = 'none';
+  document.getElementById('grabandoBarra').style.display = 'flex';
+  const b = document.getElementById('botonAccion');
+  b.textContent = '➤'; b.classList.add('grabando');
+  reloj = setInterval(() => {
+    tiempoGrab++;
+    const m = Math.floor(tiempoGrab / 60), s = String(tiempoGrab % 60).padStart(2, '0');
+    document.getElementById('segundos').textContent = m + ':' + s;
+    if (tiempoGrab >= MAX_SEG_AUDIO) detenerGrabacion(true);
+  }, 1000);
+}
+
+function detenerGrabacion(enviarAudio) {
+  if (!grabando) return;
+  grabando = false;
+  clearInterval(reloj);
+  grabador.enviar = enviarAudio;
+  grabador.stop();
+  document.getElementById('texto').style.display = '';
+  document.getElementById('grabandoBarra').style.display = 'none';
+  const b = document.getElementById('botonAccion');
+  b.classList.remove('grabando');
+  cambiarBoton();
+}
+
+function agregar(m) { mensajes.push(m); dibujar(); }
+function sistema(t) { mensajes.push({ sis: true, texto: t, hora: Date.now() }); dibujar(); }
+function aviso(t) { mensajes.push({ aviso: true, texto: t, hora: Date.now() }); dibujar(); }
+
+function dibujar() {
+  const cont = document.getElementById('mensajes');
+  const sigueAbajo = cont.scrollHeight - cont.scrollTop - cont.clientHeight < 80;
+  cont.innerHTML = '';
+  mensajes.forEach(m => {
+    const div = document.createElement('div');
+    if (m.aviso) { div.className = 'aviso'; div.textContent = m.texto; }
+    else if (m.sis) { div.className = 'sis'; div.textContent = m.texto; }
+    else {
+      div.className = 'msg ' + (m.mio ? 'yo' : 'otro');
+      const hora = new Date(m.hora).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      if (!m.mio) {
+        const a = document.createElement('div');
+        a.className = 'autor'; a.style.color = colorDe(m.nombre); a.textContent = m.nombre;
+        div.appendChild(a);
+      }
+      if (m.audioUrl) {
+        const au = document.createElement('audio');
+        au.controls = true; au.src = m.audioUrl; au.preload = 'metadata';
+        div.appendChild(au);
+      } else {
+        const t = document.createElement('span');
+        t.className = 'texto'; t.textContent = m.texto;
+        div.appendChild(t);
+      }
+      const pie = document.createElement('span');
+      pie.className = 'pie';
+      pie.innerHTML = hora + (m.mio ? ' <span class="check">✓✓</span>' : '');
+      div.appendChild(pie);
+    }
+    cont.appendChild(div);
+  });
+  if (sigueAbajo) cont.scrollTop = cont.scrollHeight;
+}
+
+function mostrarChat() {
+  document.getElementById('inicio').style.display = 'none';
+  document.getElementById('chat').style.display = 'flex';
+}
+
+/* Borrado automático: cada segundo se descartan textos y audios viejos */
+setInterval(() => {
+  const ahora = Date.now();
+  const viejos = mensajes.filter(m => !m.aviso && !m.sis && ahora - m.hora >= MS_BORRADO);
+  if (viejos.length) {
+    viejos.forEach(m => { if (m.audioUrl) URL.revokeObjectURL(m.audioUrl); });
+    mensajes = mensajes.filter(m => m.aviso || m.sis || ahora - m.hora < MS_BORRADO);
+    dibujar();
+  }
+  const cuenta = document.getElementById('cuenta');
+  if (cuenta) cuenta.textContent = 'Mensajes temporales · ' + MINUTOS_BORRADO + ' min';
+}, 1000);
+
+window.addEventListener('beforeunload', () => { mensajes = []; });
+</script>
+</body>
+</html>
